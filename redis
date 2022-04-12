@@ -1,0 +1,154 @@
+#!/bin/bash
+Set_bash()
+{
+  yum install -y unzip gcc python python-devel.x86_64 curl-devel expat-devel gettext-devel openssl-devel zlib-devel git-core 
+  python --version 2>tmp.txt
+  pyver=$(cat tmp.txt | awk '{print $2}' |awk -F '.' '{print $1}')
+  case $pyver in
+  2)
+   echo "python version is 2"
+   curl -O https://bootstrap.pypa.io/pip/2.7/get-pip.py
+;;
+  3)
+   echo "python version is 3"
+   curl -O https://bootstrap.pypa.io/get-pip.py
+esac 
+   python get-pip.py --user
+   echo "export PATH=/root/.local/bin:$PATH" >>/etc/profile
+   source /etc/profile 
+   pip install rdbtools python-lzf
+   unzip redis-rdb-tools-master.zip
+   cd redis-rdb-tools-master && python setup.py install
+   rm -fr tmp.txt
+}
+
+Get_profile()
+{
+  read -p "redis port:" port
+  read -p "redis ip:" ip
+  read -p "redis passwd:" passwd
+  read -p "每次获取的量:" count
+  cursor=0
+  new_cursor=1
+  return $port 
+  return $ip 
+  return $passwd 
+  return $count 
+  return $cursor 
+  return $new_cursor
+}
+Find_nottl()
+{
+  port=$1
+  cursor=$2
+  count=$3
+  passwd=$4
+  new_cursor=$5
+  ip=$6
+  read -p "游标获取all keys or dump文件中获取all kyes:(1/2)" findtype
+  if [ $findtype = 1 ]
+  then
+    while [[ $new_cursor -ne 0 ]]
+    do
+      redis-cli -p $port -h $ip -a $passwd scan $cursor count $count >out_tmp.txt 2>/dev/null
+      new_cursor=$(cat out_tmp.txt |awk 'NR==1{print}')
+      sed -n '2,$p' out_tmp.txt >>out_tmp_key.txt
+      cursor=$new_cursor
+    done
+    sed '/^\s*$/d' out_tmp_key.txt >all_keys.txt
+    rm -fr out_tmp.txt out_tmp_key.txt
+  else
+    read -p "redis实例dump.rdb文件路径" rdbpath
+    rdb -c justkeys $rdbpath >>all_keys.txt
+  fi
+  cat all_keys.txt |while read line
+  do
+    ttl_result=`redis-cli -p $port -h $ip -a $passwd ttl $line 2>/dev/null`
+    if [ $ttl_result -eq -1 ]
+    then
+      echo "$line" >>no_ttl_keys.txt
+    fi
+  done
+}
+
+Dele_keys()
+{
+  rm -fr memory.csv top*.txt
+  keynum=$(cat no_ttl_keys.txt |wc -l)
+  if [ $keynum -gt 1000 ]
+  then
+    echo "keys个数超过1千建议使用UNLINK方式删除"
+    read -p "是否确认使用UNLINK方式y/n:" sure
+    if [ $sure = y ]
+    then
+      dele=UNLINK
+    else
+      dele=del
+    fi
+  else
+    dele=del
+  fi
+  localhost=`pwd`
+  read -p "请确认是否删掉该文件中$localhost/no_ttl_keys.txt包含的key(y/n)：" desure
+  if [ $desure = y ]
+  then
+    cat no_ttl_keys.txt | while read line
+    do
+       echo $dele $line >>delete.txt
+    done
+  else
+     echo "请确认好文件或重新收集信息"
+  fi
+}
+
+Find_memory()
+{
+    read -p "redis实例dump.rdb文件路径" rdbpath
+    read -p "输出内存最大值前多少个key：" topmem
+    rdb -c memory $rdbpath -f memory.csv
+    sort -n -k 4 -t , memory.csv -r memory.csv | head -n $topmem >top$topmem.txt
+    return $topmem
+}
+
+type=$1
+rdbresult=$(which rdb)
+if [ ! -n "$rdbresult" ]
+then
+  echo "初始化环境中...."
+  Set_bash
+  echo "rdb 工具已安装 ok"
+else
+  echo "rdb存在无需初始化"
+fi
+case $type in 
+nottl)
+  echo "find no ttl keys"
+  rm -fr all_keys.txt no_ttl_keys.txt
+  Get_profile
+  Find_nottl $port $cursor $count $passwd $new_cursor $ip
+;;
+dele)
+  echo "delete no ttl keys"
+  rm -fr delete.txt
+  Get_profile
+  Dele_keys
+  read -p "删除文件已生成是否立即删除（y/n）:" dsure
+  if [ $dsure = y ]
+  then
+    cat delete.txt | redis-cli -c -a $passwd -p $port -h $ip --pipe 2>/dev/null
+  else
+    echo "请根据如下命令手动去执行：cat delete.txt | redis-cli -c -a $passwd -p $port -h $ip --pipe"
+  fi
+;;
+maxmem)
+  echo "开始收集bigkeys..."
+  Find_memory
+  echo "bigey见top$topmem.txt文件"
+;;
+--help)
+  echo "sh no_ttl.sh [option]  option:nottl 查找没有设置过期的key \n
+  				del  删除没有ttl的keys \n
+   				maxmem   查看bigkey \n
+				--help 查看使用方法"
+esac
+rm -fr out_tmp.txt out_tmp_key.txt 
